@@ -15,9 +15,12 @@ HEADERS = {"User-Agent": "Home-AID-Kit-open-data-catalog/1.0 (+GitHub Actions)"}
 ALIASES = {
     "gtin": ["gtin", "код gtin", "гтин", "global trade item number"],
     "name": ["prod_sell_name", "торговое наименование лекарственного препарата", "торговое наименование", "prod_desc_label", "наименование на упаковке", "наименование товара", "название препарата", "product name"],
+    "label": ["prod_desc_label", "наименование на упаковке", "описание на упаковке"],
     "inn": ["prod_name", "мнн", "международное непатентованное наименование", "наименование действующего вещества"],
     "form": ["type_form", "лекарственная форма", "форма выпуска", "форма препарата", "dosage form"],
     "pack": ["prod_pack1_ed_name", "количество (мера", "количество в первичной упаковке", "описание упаковки", "первичная упаковка", "packaging"],
+    "content": ["prod_content", "содержимое лекарственного препарата", "состав/содержимое", "содержимое"],
+    "description": ["prod_desc", "описание лекарственного препарата", "описание препарата", "описание"],
 }
 
 def norm(s: str) -> str:
@@ -56,29 +59,75 @@ def find_dataset_url(html: str) -> str | None:
             pass
     return None
 
-def category_for(form: str, name: str, pack: str) -> str:
-    text = " ".join([form, name, pack]).lower().replace("ё", "е")
-    if re.search(r"ампул", text): return "ампулы"
-    if re.search(r"спре[йя]|аэрозол", text): return "спреи"
-    if re.search(r"маз[ьи]|крем|гел[ьи]|паст", text): return "мази"
-    if re.search(r"таблет|капсул|драже", text): return "таблетки"
-    if re.search(r"порош|гранул|саше|пакетик", text): return "пакетики"
-    if re.search(r"раствор|сироп|капл|суспенз|флакон|бутыл|капельниц", text): return "емкости"
+def category_for(form: str, name: str, pack: str, label: str = "", content: str = "", description: str = "") -> str:
+    """Infer the app's inventory unit from the registered dosage form first."""
+    def clean(value: str) -> str:
+        return str(value or "").lower().replace("ё", "е")
+
+    form_text = clean(form)
+    package_text = clean(" ".join([pack, label, content, description]))
+    all_text = " ".join([form_text, clean(name), package_text])
+
+    # Explicit packaging/form clues take priority over words in a trade name.
+    if re.search(r"ампул", form_text + " " + package_text): return "ампулы"
+    if re.search(r"спре[йя]|аэрозол", form_text): return "спреи"
+    if re.search(r"маз[ьи]|крем|гел[ьи]|паст|линимент", form_text): return "мази"
+    if re.search(r"порош|гранул|саше|пакетик", form_text): return "пакетики"
+    if re.search(r"капл|раствор|сироп|суспенз|эмульс|микстур|концентрат|настойк", form_text): return "емкости"
+    if re.search(r"таблет|капсул|драже", form_text): return "таблетки"
+
+    if re.search(r"спре[йя]|аэрозол", all_text): return "спреи"
+    if re.search(r"маз[ьи]|крем|гел[ьи]|паст|линимент", all_text): return "мази"
+    if re.search(r"порош|гранул|саше|пакетик", all_text): return "пакетики"
+    if re.search(r"капл|раствор|сироп|суспенз|эмульс|микстур|концентрат|настойк|флакон|бутыл", all_text): return "емкости"
+    if re.search(r"таблет|капсул|драже", all_text): return "таблетки"
     return ""
 
-def package_count(category: str, pack: str, form: str) -> int | None:
-    if not pack: return None
-    patterns = {
-        "таблетки": r"(?<!\d)(\d{1,4})\s*(?:таблет(?:ок|ки|ка)?|капсул(?:а|ы)?|драже)\b",
-        "пакетики": r"(?<!\d)(\d{1,4})\s*(?:пакетик(?:ов|а)?|пакет(?:ов|а)?|саше)\b",
-        "ампулы": r"(?<!\d)(\d{1,4})\s*ампул(?:а|ы)?\b",
-    }
-    pattern = patterns.get(category)
-    if not pattern: return None
-    m = re.search(pattern, (pack + " " + form).lower().replace("ё", "е"))
-    if not m: return None
-    value = int(m.group(1))
-    return value if 0 < value <= 10000 else None
+
+def package_count(category: str, package_text: str) -> int | None:
+    """Extract only explicit units-per-pack counts; never treat mg/ml as a count."""
+    text = str(package_text or "").lower().replace("ё", "е").replace("×", "x")
+    if not text:
+        return None
+
+    unit = {
+        "таблетки": r"таблет(?:ка|ки|ок)?|капсул(?:а|ы)?|драже",
+        "пакетики": r"пакетик(?:а|и|ов)?|пакет(?:а|ы|ов)?|саше",
+        "ампулы": r"ампул(?:а|ы)?",
+    }.get(category)
+    if not unit:
+        return None
+
+    # e.g. 3 блистера по 10 таблеток, 2x10 таблеток, 2 х 10 капсул.
+    m = re.search(rf"(?<!\d)(\d{{1,3}})\s*(?:блистер\w*|упаковк\w*)\s*(?:по\s*)?(\d{{1,3}})\s*(?:{unit})\b", text)
+    if m:
+        value = int(m.group(1)) * int(m.group(2))
+        return value if 0 < value <= 10000 else None
+    m = re.search(rf"(?<!\d)(\d{{1,3}})\s*x\s*(\d{{1,3}})\s*(?:{unit})\b", text)
+    if m:
+        value = int(m.group(1)) * int(m.group(2))
+        return value if 0 < value <= 10000 else None
+
+    # Explicit count next to the dosage form, in either word order.
+    patterns = [
+        rf"(?<!\d)(\d{{1,4}})\s*(?:{unit})\b",
+        rf"(?:{unit})\s*(?:№|n\.?\s*)\s*(\d{{1,4}})\b",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, text)
+        if m:
+            value = int(m.group(1))
+            return value if 0 < value <= 10000 else None
+
+    # A package number such as "таблетки 500 мг № 20" is safe only when
+    # the same source text explicitly identifies tablets/capsules/dragees.
+    if category == "таблетки" and re.search(r"таблет|капсул|драже", text):
+        m = re.search(r"(?:№\s*|n\.?\s*)(\d{1,4})\b", text)
+        if m:
+            value = int(m.group(1))
+            return value if 0 < value <= 10000 else None
+    return None
+
 
 def parse_csv(content: bytes):
     text = content.decode("utf-8-sig", errors="replace")
@@ -111,9 +160,13 @@ def main():
         if not name: continue
         form = get_field(row, "form")
         pack = get_field(row, "pack")
-        category = category_for(form, name, pack)
+        label = get_field(row, "label")
+        content = get_field(row, "content")
+        description = get_field(row, "description")
+        category = category_for(form, name, pack, label, content, description)
+        package_text = " ".join(x for x in [pack, label, content, description] if x)
         item = {"name": name, "form": form, "category": category, "packageInfo": pack}
-        count = package_count(category, pack, form)
+        count = package_count(category, package_text)
         if count is not None: item["packageCount"] = count
         # Deliberately no dose/expiry fields: this open catalogue cannot guarantee
         # dosage for every GTIN or the expiry date of a specific physical pack.
