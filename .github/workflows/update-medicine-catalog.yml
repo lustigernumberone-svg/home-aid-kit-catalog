@@ -1,3 +1,4 @@
+
 name: Update medicine catalogue
 
 on:
@@ -20,28 +21,39 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
       - name: Install dependencies
         run: python -m pip install --disable-pip-version-check requests
+
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
+
       - name: Build GTIN catalogue
         run: python scripts/build_catalog.py
+
       - name: Prepare Pages artifact
         run: |
           mkdir -p site/catalog
           cp public/catalog/*.json site/catalog/
           printf '%s\n' 'Home AID Kit public medicine catalogue' > site/index.html
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: site
+          name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
+
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+        with:
+          artifact_name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
